@@ -60,7 +60,7 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
   }
 
   template <class... Args>
-  bool emplace_value(Args&&... args) noexcept(noexcept(new(&mem_) R(std::forward<Args>(args)...))) {
+  bool emplace_value(Args&&... args) noexcept(noexcept(R(std::forward<Args>(args)...))) {
     {
       std::unique_lock<std::mutex> lk(mu_);
       if (has_value()) {
@@ -127,7 +127,7 @@ class promise {
   promise& operator=(const promise&) = delete;
 
   template <class Tp, typename std::enable_if<std::is_constructible<R, Tp>::value, int>::type = 0>
-  bool set_value(Tp&& val) noexcept(noexcept(shared_s_->emplace_value(std::forward<Tp>(val)))) {
+  bool set_value(Tp&& val) noexcept(noexcept(std::declval<shared_state>().emplace_value(std::forward<Tp>(val)))) {
     return shared_s_->emplace_value(std::forward<Tp>(val));
   }
 
@@ -157,7 +157,7 @@ class future {
   R get() {
     R value = std::move(shared_s_->get_value());
     shared_s_.reset();
-    return std::move(value);
+    return value;
   }
 
   void wait() const { shared_s_->wait(); }
