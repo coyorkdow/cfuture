@@ -1,15 +1,8 @@
-#include <atomic>
-#include <cassert>
 #include <condition_variable>
-#include <coroutine>
 #include <cstdint>
 #include <future>
-#include <iostream>
 #include <memory>
 #include <mutex>
-#include <optional>
-#include <string>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -195,20 +188,3 @@ future<R> promise<R>::get_future() {
 }
 
 }  // namespace cfuture
-
-int main() {
-  { std::promise<int> p; }
-  using namespace std::chrono_literals;
-  cfuture::promise<std::string> p;
-  std::thread th([&] {
-    std::this_thread::sleep_for(1s);
-    p.set_value("print some strings after the 1s delay");
-  });
-  auto future = p.get_future();
-  while (future.wait_for(1ms) == std::future_status::timeout) {
-  }
-  future.wait();
-  std::cout << future.get() << '\n';
-  assert(!future.valid());
-  th.join();
-}
