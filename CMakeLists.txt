@@ -14,6 +14,8 @@ else ()
     endif ()
 endif ()
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
+
 include_directories(.)
 
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
