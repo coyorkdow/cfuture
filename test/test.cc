@@ -1,3 +1,5 @@
+#include <thread>
+
 #include "cfuture.hpp"
 #include "gtest/gtest.h"
 
