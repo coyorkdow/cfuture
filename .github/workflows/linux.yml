@@ -27,6 +27,7 @@ jobs:
 
       - name: build
         run: |
+          ls -l
           cat CMakeLists.txt && cmake -B./build
           cd build && cmake --build .
 
