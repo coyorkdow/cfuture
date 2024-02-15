@@ -126,7 +126,6 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
   std::condition_variable con_;
 
   uint8_t state_{0};
-  future_errc errc_{future_errc::no_err};
 
   enum : uint8_t {  // set the internal state
     constructed = 1,
@@ -149,14 +148,11 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
 
   bool has_value() const noexcept { return state_ & constructed; }
 
-  bool ready() const noexcept { return has_value() && !exception_ && errc_ == future_errc::no_err; }
+  bool ready() const noexcept { return has_value() && !exception_; }
 
-  bool satisfied() const noexcept { return has_value() || exception_ || errc_ != future_errc::no_err; }
+  bool satisfied() const noexcept { return has_value() || exception_; }
 
   void maybe_throw_exception() {
-    if (errc_ != future_errc::no_err) {
-      throw future_error{errc_};
-    }
     if (exception_) {
       std::rethrow_exception(exception_);
     }
@@ -178,21 +174,6 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
       return false;
     }
     exception_ = p;
-    if (on_satisfied_) {
-      on_satisfied_(this);
-    }
-    return true;
-  }
-
-  bool set_exception(future_errc errc) {
-    if (errc == future_errc::no_state) {
-      std::abort();
-    }
-    std::unique_lock<std::mutex> lk(mu_);
-    if (satisfied()) {
-      return false;
-    }
-    errc_ = errc;
     if (on_satisfied_) {
       on_satisfied_(this);
     }
@@ -242,6 +223,9 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
   template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
   auto make_continuation_shared_state(Fn&& attached_fn)
       -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, R>>>>;
+
+  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn, R>>>;
 
   void wait() {
     std::unique_lock<std::mutex> lk(mu_);
@@ -296,7 +280,7 @@ class promise {
 
   ~promise() noexcept {
     if (shared_s_) {
-      shared_s_->set_exception(future_errc::broken_promise);
+      shared_s_->set_exception(std::make_exception_ptr(future_error{future_errc::broken_promise}));
     }
   }
 
@@ -417,11 +401,7 @@ auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
     static_assert(std::is_same<future_t, future<result_t>>::value, "you have made something wrong!");
     assert(self->satisfied());
     if (!self->ready()) {
-      if (self->errc_ != future_errc::no_err) {
-        new_state->set_exception(self->errc_);
-      } else {
-        new_state->set_exception(self->exception_);
-      }
+      new_state->set_exception(self->exception_);
       return;
     }
 
@@ -431,15 +411,36 @@ auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
         [new_state = std::move(new_state)](shared_state<result_t>* wrapped_state_self) {
           assert(wrapped_state_self->satisfied());
           if (!wrapped_state_self->ready()) {
-            if (wrapped_state_self->errc_ != future_errc::no_err) {
-              new_state->set_exception(wrapped_state_self->errc_);
-            } else {
-              new_state->set_exception(wrapped_state_self->exception_);
-            }
+            new_state->set_exception(wrapped_state_self->exception_);
             return;
           }
           new_state->emplace_value(std::move(wrapped_state_self->get_value_unsafe()));
         });
+  });
+
+  return new_state;
+}
+
+template <class R>
+template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, R>>::value, int>::type>
+auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
+    -> std::shared_ptr<shared_state<invoke_result_t<Fn, R>>> {
+  using result_t = invoke_result_t<Fn, R>;
+  std::shared_ptr<shared_state<result_t>> new_state = shared_state<result_t>::make_new_state();
+
+  std::unique_lock<std::mutex> lk(mu_);
+  set_on_satisfied_([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
+    assert(self->satisfied());
+    if (!self->ready()) {
+      new_state->set_exception(self->exception_);
+      return;
+    }
+
+    try {
+      new_state->emplace_value(attached_fn(std::move(self->get_value_unsafe())));
+    } catch (...) {
+      new_state->set_exception(std::current_exception());
+    };
   });
 
   return new_state;
