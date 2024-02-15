@@ -9,7 +9,7 @@
 #include "cfuture.hpp"
 #include "gtest/gtest.h"
 
-TEST(BasicFut, Get) {
+TEST(BasicTest, Get) {
   using namespace std::chrono_literals;
   cfuture::promise<std::string> p;
   std::thread th([&] {
@@ -18,6 +18,22 @@ TEST(BasicFut, Get) {
   });
   auto future = p.get_future();
   EXPECT_EQ("print some strings after the 1s delay", future.get());
+  EXPECT_FALSE(future.valid());
+  th.join();
+}
+
+TEST(BasicTest, VoidGet) {
+  using namespace std::chrono_literals;
+  cfuture::promise<void> p;
+  std::string val;
+  std::thread th([&] {
+    std::this_thread::sleep_for(1s);
+    val.assign("print some strings after the 1s delay");
+    p.set_value();
+  });
+  auto future = p.get_future();
+  future.get();
+  EXPECT_EQ("print some strings after the 1s delay", val);
   EXPECT_FALSE(future.valid());
   th.join();
 }
@@ -199,9 +215,7 @@ TEST(ContinuationTest, MakeStateReturnDirectly) {
   std::shared_ptr<internal::shared_state<std::string>> new_state;
   {
     auto state = internal::shared_state<int>::make_new_state();
-    new_state = state->make_continuation_shared_state([](int v) {
-      return std::to_string(v);
-    });
+    new_state = state->make_continuation_shared_state([](int v) { return std::to_string(v); });
     state->emplace_value(12345);
   }
   EXPECT_EQ("12345", new_state->get_value());

@@ -116,11 +116,8 @@ struct unwrap_future<future<R>> {
 template <class Tp>
 using unwrap_future_t = typename unwrap_future<Tp>::type;
 
-template <class R>
-struct shared_state : std::enable_shared_from_this<shared_state<R>> {
-  shared_state() = default;
-
- public:
+template <class SharedState>
+struct shared_state_base {
   std::exception_ptr exception_;
   std::mutex mu_;
   std::condition_variable con_;
@@ -134,17 +131,7 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
     deferred = 8
   };
 
-  std::aligned_storage_t<sizeof(R), alignof(R)> mem_{0};
-
-  std::function<void(shared_state*)> on_satisfied_;
-
-  static std::shared_ptr<shared_state> make_new_state() { return std::make_shared<shared_state>(); }
-
-  ~shared_state() {
-    if (has_value()) {
-      destroy_at<R>(&mem_);
-    }
-  }
+  std::function<void(SharedState*)> on_satisfied_;
 
   bool has_value() const noexcept { return state_ & constructed; }
 
@@ -158,14 +145,14 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
     }
   }
 
-  std::shared_ptr<shared_state> attach_future() noexcept {
+  std::shared_ptr<SharedState> attach_future() noexcept {
     std::lock_guard<std::mutex> lk(mu_);
     bool has_future_attached = (state_ & future_attached) != 0;
     state_ |= future_attached;
     if (has_future_attached) {
       return {};
     }
-    return this->shared_from_this();
+    return static_cast<SharedState*>(this)->shared_from_this();
   }
 
   bool set_exception(std::exception_ptr p) {
@@ -175,57 +162,19 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
     }
     exception_ = p;
     if (on_satisfied_) {
-      on_satisfied_(this);
+      on_satisfied_(static_cast<SharedState*>(this));
     }
     return true;
   }
 
-  template <class... Args>
-  bool emplace_value(Args&&... args) {
-    {
-      std::unique_lock<std::mutex> lk(mu_);
-      if (satisfied()) {
-        return false;
-      }
-      new (&mem_) R(std::forward<Args>(args)...);
-      state_ |= constructed;
-      if (on_satisfied_) {
-        on_satisfied_(this);
-      }
-    }
-    con_.notify_all();
-    return true;
-  }
-
-  R& get_value() {
-    std::unique_lock<std::mutex> lk(mu_);
-    while (!satisfied()) {
-      con_.wait(lk);
-    }
-    maybe_throw_exception();
-    return *reinterpret_cast<R*>(&mem_);
-  }
-
-  R& get_value_unsafe() {
-    maybe_throw_exception();
-    return *reinterpret_cast<R*>(&mem_);
-  }
-
-  void set_on_satisfied_(std::function<void(shared_state*)> callback) noexcept {
+  void set_on_satisfied(std::function<void(SharedState*)> callback) noexcept {
     // not thread safe
     if (satisfied()) {
-      callback(this);
+      callback(static_cast<SharedState*>(this));
     } else {
       on_satisfied_ = std::move(callback);
     }
   }
-
-  template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
-  auto make_continuation_shared_state(Fn&& attached_fn)
-      -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, R>>>>;
-
-  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
-  auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn, R>>>;
 
   void wait() {
     std::unique_lock<std::mutex> lk(mu_);
@@ -255,6 +204,131 @@ struct shared_state : std::enable_shared_from_this<shared_state<R>> {
   future_status wait_for(const std::chrono::duration<Rep, Period>& rel_time) {
     return wait_until(std::chrono::steady_clock::now() + rel_time);
   }
+};
+
+template <class R>
+struct shared_state : shared_state_base<shared_state<R>>, std::enable_shared_from_this<shared_state<R>> {
+ private:
+  struct private_construct_helper {};
+  using base = shared_state_base<shared_state<R>>;
+
+ public:
+  std::aligned_storage_t<sizeof(R), alignof(R)> mem_{0};
+
+  using base::con_;
+  using base::exception_;
+  using base::mu_;
+  using base::on_satisfied_;
+  using base::state_;
+
+  using base::has_value;
+  using base::maybe_throw_exception;
+  using base::satisfied;
+  using base::set_on_satisfied;
+
+  explicit shared_state(private_construct_helper) {}
+
+  static std::shared_ptr<shared_state> make_new_state() {
+    return std::make_shared<shared_state>(private_construct_helper{});
+  }
+
+  ~shared_state() {
+    if (base::has_value()) {
+      destroy_at<R>(&mem_);
+    }
+  }
+
+  template <class... Args>
+  bool emplace_value(Args&&... args) {
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      if (satisfied()) {
+        return false;
+      }
+      new (&mem_) R(std::forward<Args>(args)...);
+      state_ |= base::constructed;
+      if (on_satisfied_) {
+        on_satisfied_(this);
+      }
+    }
+    con_.notify_all();
+    return true;
+  }
+
+  R& get_value() {
+    std::unique_lock<std::mutex> lk(mu_);
+    while (!satisfied()) {
+      con_.wait(lk);
+    }
+    maybe_throw_exception();
+    return *reinterpret_cast<R*>(&mem_);
+  }
+
+  R& get_value_unsafe() {
+    maybe_throw_exception();
+    return *reinterpret_cast<R*>(&mem_);
+  }
+
+  template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& attached_fn)
+      -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, R>>>>;
+
+  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn, R>>>;
+};
+
+template <>
+struct shared_state<void> : shared_state_base<shared_state<void>>, std::enable_shared_from_this<shared_state<void>> {
+  struct private_construct_helper {};
+  using base = shared_state_base<shared_state<void>>;
+
+ public:
+  using base::con_;
+  using base::exception_;
+  using base::mu_;
+  using base::on_satisfied_;
+  using base::state_;
+
+  using base::has_value;
+  using base::maybe_throw_exception;
+  using base::satisfied;
+  using base::set_on_satisfied;
+
+  explicit shared_state(private_construct_helper) {}
+
+  static std::shared_ptr<shared_state> make_new_state() {
+    return std::make_shared<shared_state>(private_construct_helper{});
+  }
+
+  bool emplace_value() {
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      if (satisfied()) {
+        return false;
+      }
+      state_ |= base::constructed;
+      if (on_satisfied_) {
+        on_satisfied_(this);
+      }
+    }
+    con_.notify_all();
+    return true;
+  }
+
+  void get_value() {
+    std::unique_lock<std::mutex> lk(mu_);
+    while (!satisfied()) {
+      con_.wait(lk);
+    }
+    maybe_throw_exception();
+  }
+
+  template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& attached_fn)
+      -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn>>>>;
+
+  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn>>>;
 };
 
 }  // namespace internal
@@ -300,6 +374,44 @@ class promise {
   }
 
   future<R> get_future();
+
+ private:
+  std::shared_ptr<shared_state> shared_s_;
+};
+
+template <>
+class promise<void> {
+  using shared_state = internal::shared_state<void>;
+
+ public:
+  promise() : shared_s_(shared_state::make_new_state()) {}
+  promise(promise&&) noexcept = default;
+  promise& operator=(promise&&) noexcept = default;
+
+  promise(const promise&) = delete;
+  promise& operator=(const promise&) = delete;
+
+  ~promise() noexcept {
+    if (shared_s_) {
+      shared_s_->set_exception(std::make_exception_ptr(future_error{future_errc::broken_promise}));
+    }
+  }
+
+  void set_value() {
+    THROW_IF_NO_STATE_();
+    if (!shared_s_->emplace_value()) {
+      throw future_error{future_errc::promise_already_satisfied};
+    }
+  }
+
+  void set_exception(std::exception_ptr p) {
+    THROW_IF_NO_STATE_();
+    if (!shared_s_->set_exception(p)) {
+      throw future_error{future_errc::promise_already_satisfied};
+    }
+  }
+
+  future<void> get_future();
 
  private:
   std::shared_ptr<shared_state> shared_s_;
@@ -366,12 +478,70 @@ class future {
   std::shared_ptr<shared_state> shared_s_;
 };
 
+template <>
+class future<void> {
+  using shared_state = internal::shared_state<void>;
+
+  template <class>
+  friend class promise;
+
+  template <class>
+  friend struct internal::shared_state;
+
+ public:
+  future() noexcept = default;
+  future(future&&) noexcept = default;
+  future& operator=(future&&) noexcept = default;
+
+  future(const future&) = delete;
+  future& operator=(const future&) = delete;
+
+  bool valid() const noexcept { return static_cast<bool>(shared_s_); }
+
+  void get() {
+    THROW_IF_NO_STATE_();
+    shared_s_->get_value();
+    shared_s_.reset();
+  }
+
+  void wait() const {
+    THROW_IF_NO_STATE_();
+    shared_s_->wait();
+  }
+
+  template <class Clock, class Duration>
+  future_status wait_until(const std::chrono::time_point<Clock, Duration>& abs_time) const {
+    THROW_IF_NO_STATE_();
+    return shared_s_->wait_until(abs_time);
+  }
+
+  template <class Rep, class Period>
+  future_status wait_for(const std::chrono::duration<Rep, Period>& rel_time) const {
+    THROW_IF_NO_STATE_();
+    return shared_s_->wait_for(rel_time);
+  }
+
+ private:
+  explicit future(std::shared_ptr<shared_state> s) noexcept : shared_s_(std::move(s)) {}
+
+  std::shared_ptr<shared_state> shared_s_;
+};
+
 template <class R>
 future<R> promise<R>::get_future() {
   THROW_IF_NO_STATE_();
   auto s = shared_s_->attach_future();
   if (s) {
     return future<R>{s};
+  }
+  throw future_error{future_errc::future_already_retrieved};
+}
+
+inline future<void> promise<void>::get_future() {
+  THROW_IF_NO_STATE_();
+  auto s = shared_s_->attach_future();
+  if (s) {
+    return future<void>{s};
   }
   throw future_error{future_errc::future_already_retrieved};
 }
@@ -396,7 +566,7 @@ auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
   std::shared_ptr<shared_state<result_t>> new_state = shared_state<result_t>::make_new_state();
 
   std::unique_lock<std::mutex> lk(mu_);
-  set_on_satisfied_([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
+  set_on_satisfied([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
     using future_t = invoke_result_t<Fn, R>;
     static_assert(std::is_same<future_t, future<result_t>>::value, "you have made something wrong!");
     assert(self->satisfied());
@@ -407,7 +577,7 @@ auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
 
     future_t wrapped_future = attached_fn(std::move(self->get_value_unsafe()));
     std::unique_lock<std::mutex> lk(wrapped_future.shared_s_->mu_);
-    wrapped_future.shared_s_->set_on_satisfied_(
+    wrapped_future.shared_s_->set_on_satisfied(
         [new_state = std::move(new_state)](shared_state<result_t>* wrapped_state_self) {
           assert(wrapped_state_self->satisfied());
           if (!wrapped_state_self->ready()) {
@@ -429,7 +599,7 @@ auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
   std::shared_ptr<shared_state<result_t>> new_state = shared_state<result_t>::make_new_state();
 
   std::unique_lock<std::mutex> lk(mu_);
-  set_on_satisfied_([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
+  set_on_satisfied([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
     assert(self->satisfied());
     if (!self->ready()) {
       new_state->set_exception(self->exception_);
