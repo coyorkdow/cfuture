@@ -172,20 +172,37 @@ TEST(BasicExceptionTest, BrokenPromise) {
       cfuture::future_error);
 }
 
-TEST(ContinuationTest, MakeState) {
+TEST(ContinuationTest, MakeStateReturnFuture) {
+  using namespace std::chrono_literals;
   using namespace cfuture;
-  auto state = internal::shared_state<int>::make_new_state();
-  auto new_state = state->make_continuation_shared_state([](int v) {
-    cfuture::promise<std::string> p;
-    auto future = p.get_future();
-    std::thread th([v, p = std::move(p)]() mutable {
-      ////
-      p.set_value(std::to_string(v));
+  std::shared_ptr<internal::shared_state<std::string>> new_state;
+  {
+    auto state = internal::shared_state<int>::make_new_state();
+    new_state = state->make_continuation_shared_state([](int v) {
+      cfuture::promise<std::string> p;
+      auto future = p.get_future();
+      std::thread th([v, p = std::move(p)]() mutable {
+        std::this_thread::sleep_for(100ms);
+        p.set_value(std::to_string(v));
+      });
+      th.detach();
+      return future;
     });
-    th.detach();
-    return future;
-  });
-  static_assert(std::is_same<decltype(new_state), std::shared_ptr<internal::shared_state<std::string>>>::value, "");
-  state->emplace_value(12345);
+    state->emplace_value(12345);
+  }
+  EXPECT_EQ("12345", new_state->get_value());
+}
+
+TEST(ContinuationTest, MakeStateReturnDirectly) {
+  using namespace std::chrono_literals;
+  using namespace cfuture;
+  std::shared_ptr<internal::shared_state<std::string>> new_state;
+  {
+    auto state = internal::shared_state<int>::make_new_state();
+    new_state = state->make_continuation_shared_state([](int v) {
+      return std::to_string(v);
+    });
+    state->emplace_value(12345);
+  }
   EXPECT_EQ("12345", new_state->get_value());
 }
