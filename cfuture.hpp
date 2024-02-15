@@ -331,6 +331,17 @@ struct shared_state<void> : shared_state_base<shared_state<void>>, std::enable_s
   auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn>>>;
 };
 
+template <class>
+struct unwrap_shared_state {};
+
+template <class R>
+struct unwrap_shared_state<shared_state<R>> {
+  using type = R;
+};
+
+template <class Tp>
+using unwrap_shared_state_t = typename unwrap_shared_state<Tp>::type;
+
 }  // namespace internal
 
 #define THROW_IF_NO_STATE_()                     \
@@ -425,6 +436,9 @@ class future {
   friend class promise;
 
   template <class>
+  friend class future;
+
+  template <class>
   friend struct internal::shared_state;
 
  public:
@@ -453,6 +467,14 @@ class future {
     } catch (...) {
     }
     return alter_value;
+  }
+
+  template <class Fn>
+  auto then(Fn&& attached_function) {
+    THROW_IF_NO_STATE_();
+    auto then_state = shared_s_->make_continuation_shared_state(std::forward<Fn>(attached_function));
+    using continuation_state_t = typename std::remove_reference<decltype(*then_state)>::type;
+    return future<internal::unwrap_shared_state_t<continuation_state_t>>{std::move(then_state)};
   }
 
   void wait() const {

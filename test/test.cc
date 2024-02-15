@@ -220,3 +220,40 @@ TEST(ContinuationTest, MakeStateReturnDirectly) {
   }
   EXPECT_EQ("12345", new_state->get_value());
 }
+
+TEST(ContinuationTest, FutureThen) {
+  using namespace std::chrono_literals;
+  using namespace cfuture;
+  promise<int> p;
+  std::cout << "the main thread is " << std::this_thread::get_id() << '\n';
+  std::thread th([&] {
+    std::cout << "run in thread " << std::this_thread::get_id() << '\n';
+    std::this_thread::sleep_for(100ms);
+    p.set_value(1);
+  });
+  future<std::string> f;
+  f = p.get_future()
+          .then([](int v) {
+            promise<int> p;
+            auto future = p.get_future();
+            std::thread th([v, p = std::move(p)]() mutable {
+              std::cout << "run in thread " << std::this_thread::get_id() << '\n';
+              std::this_thread::sleep_for(100ms);
+              p.set_value(v + 2);
+            });
+            th.detach();
+            return future;
+          })
+          .then([](int v) {
+            std::cout << "run in thread " << std::this_thread::get_id() << '\n';
+            std::this_thread::sleep_for(1ms);
+            return v + 3;
+          })
+          .then([](int v) {
+            std::cout << "run in thread " << std::this_thread::get_id() << '\n';
+            std::this_thread::sleep_for(1ms);
+            return std::to_string(v + 4);
+          });
+  EXPECT_EQ("10", f.get());
+  th.join();
+}
