@@ -1,6 +1,5 @@
 #include <chrono>
 #include <exception>
-#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
