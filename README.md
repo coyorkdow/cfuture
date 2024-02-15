@@ -3,6 +3,12 @@ A promise future implementation with continuation.
 
 cfuture is **header-only**, and it only has a **single file** `cfuture.hpp`. It requires cpp14.
 
+# Motivation
+
+cfuture is aimed to provide a promise/future class which supports `future::then` to attach the continuations like a chain. I admit that async/await is a better practice than promise/future when writing the asynchronous codes. But there are still a lot of projects cannot use c++20 or higher standard. Or, sometimes, the promise/future is easier than coroutine.
+
+The `boost::future` and `std::experimental::future` (in concurrency TS) both support `then`. But I hope to provide a light and easy-to-rely implementation. It isn't the cfuture's goal to be completely complied with the design of `std::future` or `boost::future`. But still, it will very close to them. It could be an alternate in most cases.
+
 # Quick Start
 
 ```cpp
