@@ -213,7 +213,7 @@ struct shared_state : shared_state_base<shared_state<R>>, std::enable_shared_fro
   using base = shared_state_base<shared_state<R>>;
 
  public:
-  std::aligned_storage_t<sizeof(R), alignof(R)> mem_{0};
+  std::aligned_storage_t<sizeof(R), alignof(R)> mem_;
 
   using base::con_;
   using base::exception_;
@@ -226,7 +226,7 @@ struct shared_state : shared_state_base<shared_state<R>>, std::enable_shared_fro
   using base::satisfied;
   using base::set_on_satisfied;
 
-  explicit shared_state(private_construct_helper) {}
+  explicit shared_state(private_construct_helper) : mem_{} {}
 
   static std::shared_ptr<shared_state> make_new_state() {
     return std::make_shared<shared_state>(private_construct_helper{});
