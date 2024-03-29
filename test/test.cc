@@ -204,7 +204,7 @@ TEST(ContinuationTest, MakeStateReturnFuture) {
       th.detach();
       return future;
     });
-    state->emplace_value(12345);
+    state->try_emplace_value(12345);
   }
   EXPECT_EQ("12345", new_state->get_value());
 }
@@ -216,7 +216,7 @@ TEST(ContinuationTest, MakeStateReturnDirectly) {
   {
     auto state = internal::shared_state<int>::make_new_state();
     new_state = state->make_continuation_shared_state([](int v) { return std::to_string(v); });
-    state->emplace_value(12345);
+    state->try_emplace_value(12345);
   }
   EXPECT_EQ("12345", new_state->get_value());
 }
