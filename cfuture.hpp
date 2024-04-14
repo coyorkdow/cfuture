@@ -107,8 +107,8 @@ struct is_future<future<R>> : std::true_type {};
 template <class>
 struct unwrap_future {};
 
-template <class R>
-struct unwrap_future<future<R>> {
+template <template <class R> class C, class R>
+struct unwrap_future<C<R>> {
   using type = R;
 };
 
@@ -122,6 +122,8 @@ using unwrap_future_t = typename unwrap_future<Tp>::type;
  */
 template <class SharedState>
 struct shared_state_base {
+  using R = unwrap_future_t<SharedState>;
+
   std::exception_ptr exception_;
   std::mutex mu_;
   std::condition_variable con_;
@@ -137,7 +139,17 @@ struct shared_state_base {
 
   // This is the callback which runs when the promise state is satisfied.
   // It is used to implement the continuation.
-  std::function<void(SharedState*)> on_satisfied_;
+  std::function<void(future<R>)> on_satisfied_;
+
+  // Continuation always takes a future as argument, which is exactly the future of the current shared state.
+  // When the continuation is set, the original future state will be moved into internal, so that is can be
+  // passed to the continuation when the current shared state is satisfied.
+  std::shared_ptr<SharedState> attached_future_state_;
+
+  void invoke_satisfaction_callback() {
+    assert(attached_future_state_);
+    on_satisfied_(future<R>{std::move(attached_future_state_)});
+  }
 
   bool has_value() const noexcept { return state_ & constructed; }
 
@@ -162,13 +174,15 @@ struct shared_state_base {
   }
 
   bool try_set_exception(std::exception_ptr p) {
-    std::unique_lock<std::mutex> lk(mu_);
-    if (satisfied()) {
-      return false;
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      if (satisfied()) {
+        return false;
+      }
+      exception_ = p;
     }
-    exception_ = p;
     if (on_satisfied_) {
-      on_satisfied_(static_cast<SharedState*>(this));
+      invoke_satisfaction_callback();
     }
     return true;
   }
@@ -182,20 +196,21 @@ struct shared_state_base {
       }
       static_cast<SharedState*>(this)->construct_value_if_not_void(std::forward<Args>(args)...);
       state_ |= constructed;
-      if (on_satisfied_) {
-        on_satisfied_(static_cast<SharedState*>(this));
-      }
+    }
+    if (on_satisfied_) {
+      invoke_satisfaction_callback();
     }
     con_.notify_all();
     return true;
   }
 
-  void set_on_satisfied(std::function<void(SharedState*)> callback) noexcept {
-    // not thread safe
+  void set_satisfaction_callback(std::function<void(future<R>)> callback) noexcept {
+    // Not thread safe
+    // It is guaranteed that this function is called from the future::then.
+    attached_future_state_ = static_cast<SharedState*>(this)->shared_from_this();
+    on_satisfied_ = std::move(callback);
     if (satisfied()) {
-      callback(static_cast<SharedState*>(this));
-    } else {
-      on_satisfied_ = std::move(callback);
+      invoke_satisfaction_callback();
     }
   }
 
@@ -242,12 +257,11 @@ struct shared_state : shared_state_base<shared_state<R>>, std::enable_shared_fro
   using base::exception_;
   using base::mu_;
   using base::on_satisfied_;
-  using base::state_;
 
   using base::has_value;
   using base::maybe_throw_exception;
   using base::satisfied;
-  using base::set_on_satisfied;
+  using base::set_satisfaction_callback;
 
   explicit shared_state(private_construct_helper) : mem_{} {}
 
@@ -280,12 +294,13 @@ struct shared_state : shared_state_base<shared_state<R>>, std::enable_shared_fro
     return *reinterpret_cast<R*>(&mem_);
   }
 
-  template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
-  auto make_continuation_shared_state(Fn&& attached_fn)
-      -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, R>>>>;
+  template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, future<R>>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& continuation)
+      -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, future<R>>>>>;
 
-  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, R>>::value, int>::type = 0>
-  auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn, R>>>;
+  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, future<R>>>::value, int>::type = 0>
+  auto make_continuation_shared_state(Fn&& continuation)
+      -> std::shared_ptr<shared_state<invoke_result_t<Fn, future<R>>>>;
 };
 
 template <>
@@ -298,12 +313,11 @@ struct shared_state<void> : shared_state_base<shared_state<void>>, std::enable_s
   using base::exception_;
   using base::mu_;
   using base::on_satisfied_;
-  using base::state_;
 
   using base::has_value;
   using base::maybe_throw_exception;
   using base::satisfied;
-  using base::set_on_satisfied;
+  using base::set_satisfaction_callback;
 
   explicit shared_state(private_construct_helper) {}
 
@@ -321,12 +335,14 @@ struct shared_state<void> : shared_state_base<shared_state<void>>, std::enable_s
     maybe_throw_exception();
   }
 
-  template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn>>::value, int>::type = 0>
-  auto make_continuation_shared_state(Fn&& attached_fn)
-      -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn>>>>;
+  void get_value_unsafe() { maybe_throw_exception(); }
 
-  template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn>>::value, int>::type = 0>
-  auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn>>>;
+  // template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn>>::value, int>::type = 0>
+  // auto make_continuation_shared_state(Fn&& attached_fn)
+  //     -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn>>>>;
+
+  // template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn>>::value, int>::type = 0>
+  // auto make_continuation_shared_state(Fn&& attached_fn) -> std::shared_ptr<shared_state<invoke_result_t<Fn>>>;
 };
 
 template <class>
@@ -437,6 +453,9 @@ class future {
   friend class future;
 
   template <class>
+  friend struct internal::shared_state_base;
+
+  template <class>
   friend struct internal::shared_state;
 
  public:
@@ -471,7 +490,8 @@ class future {
   auto then(Fn&& attached_function) {
     THROW_IF_NO_STATE_();
     auto then_state = shared_s_->make_continuation_shared_state(std::forward<Fn>(attached_function));
-    using continuation_state_t = typename std::remove_reference<decltype(*then_state)>::type;
+    shared_s_.reset();  // the current future will be invalid after this call
+    using continuation_state_t = typename decltype(then_state)::element_type;
     return future<internal::unwrap_shared_state_t<continuation_state_t>>{std::move(then_state)};
   }
 
@@ -506,7 +526,13 @@ class future<void> {
   friend class promise;
 
   template <class>
+  friend class future;
+
+  template <class>
   friend struct internal::shared_state;
+
+  template <class>
+  friend struct internal::shared_state_base;
 
  public:
   future() noexcept = default;
@@ -579,55 +605,68 @@ namespace internal {
 // attaching the continuation, the future object is always alive.
 
 template <class R>
-template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, R>>::value, int>::type>
-auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
-    -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, R>>>> {
-  using result_t = unwrap_future_t<invoke_result_t<Fn, R>>;
+bool temporary_emplace_helper(shared_state<R>* s, shared_state<R>* temp) {
+  return s->try_emplace_value(std::move(temp->get_value_unsafe()));
+}
+
+inline bool temporary_emplace_helper(shared_state<void>* s, shared_state<void>* temp) { return s->try_emplace_value(); }
+
+template <class R>
+template <class Fn, typename std::enable_if<is_future<invoke_result_t<Fn, future<R>>>::value, int>::type>
+auto shared_state<R>::make_continuation_shared_state(Fn&& continuation)
+    -> std::shared_ptr<shared_state<unwrap_future_t<invoke_result_t<Fn, future<R>>>>> {
+  using result_t = unwrap_future_t<invoke_result_t<Fn, future<R>>>;
+  // The new shared state.
+  // For example: continuation returns future<int>, the new state is shared_state<int> instead of
+  // shared_state<future<int>>.
   std::shared_ptr<shared_state<result_t>> new_state = shared_state<result_t>::make_new_state();
 
   std::unique_lock<std::mutex> lk(mu_);
-  set_on_satisfied([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
-    using future_t = invoke_result_t<Fn, R>;
-    static_assert(std::is_same<future_t, future<result_t>>::value, "you have made something wrong!");
-    assert(self->satisfied());
-    if (!self->ready()) {
-      new_state->try_set_exception(self->exception_);
-      return;
-    }
+  set_satisfaction_callback([new_state, continuation = std::forward<Fn>(continuation)](future<R> self) {
+    using continuation_res_t = invoke_result_t<Fn, future<R>>;
+    assert(self.shared_s_->satisfied());
 
-    future_t wrapped_future = attached_fn(std::move(self->get_value_unsafe()));
-    std::unique_lock<std::mutex> lk(wrapped_future.shared_s_->mu_);
-    wrapped_future.shared_s_->set_on_satisfied(
-        [new_state = std::move(new_state)](shared_state<result_t>* wrapped_state_self) {
-          assert(wrapped_state_self->satisfied());
-          if (!wrapped_state_self->ready()) {
-            new_state->try_set_exception(wrapped_state_self->exception_);
+    continuation_res_t res = continuation(std::move(self));
+    std::unique_lock<std::mutex> lk(res.shared_s_->mu_);
+    res.shared_s_->set_satisfaction_callback(
+        [new_state = std::move(new_state)](continuation_res_t continuation_res_self) {
+          auto temp_state = continuation_res_self.shared_s_;
+          assert(temp_state->satisfied());
+          if (!temp_state->ready()) {
+            new_state->try_set_exception(temp_state->exception_);
             return;
           }
-          new_state->try_emplace_value(std::move(wrapped_state_self->get_value_unsafe()));
+          temporary_emplace_helper(new_state.get(), temp_state.get());
         });
   });
 
   return new_state;
 }
 
+template <class R, class Fn, class OldR>
+bool temporary_emplace_helper2(shared_state<R>* s, Fn* continuation, future<OldR> self) {
+  return s->try_emplace_value(continuation->operator()(std::move(self)));
+}
+
+template <class Fn, class OldR>
+bool temporary_emplace_helper2(shared_state<void>* s, Fn* continuation, future<OldR> self) {
+  continuation->operator()(std::move(self));
+  return s->try_emplace_value();
+}
+
 template <class R>
-template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, R>>::value, int>::type>
-auto shared_state<R>::make_continuation_shared_state(Fn&& attached_fn)
-    -> std::shared_ptr<shared_state<invoke_result_t<Fn, R>>> {
-  using result_t = invoke_result_t<Fn, R>;
+template <class Fn, typename std::enable_if<!is_future<invoke_result_t<Fn, future<R>>>::value, int>::type>
+auto shared_state<R>::make_continuation_shared_state(Fn&& continuation)
+    -> std::shared_ptr<shared_state<invoke_result_t<Fn, future<R>>>> {
+  using result_t = invoke_result_t<Fn, future<R>>;
   std::shared_ptr<shared_state<result_t>> new_state = shared_state<result_t>::make_new_state();
 
   std::unique_lock<std::mutex> lk(mu_);
-  set_on_satisfied([new_state, attached_fn = std::forward<Fn>(attached_fn)](shared_state<R>* self) {
-    assert(self->satisfied());
-    if (!self->ready()) {
-      new_state->try_set_exception(self->exception_);
-      return;
-    }
+  set_satisfaction_callback([new_state, continuation = std::forward<Fn>(continuation)](future<R> self) {
+    assert(self.shared_s_->satisfied());
 
     try {
-      new_state->try_emplace_value(attached_fn(std::move(self->get_value_unsafe())));
+      temporary_emplace_helper2(new_state.get(), &continuation, std::move(self));
     } catch (...) {
       new_state->try_set_exception(std::current_exception());
     };

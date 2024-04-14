@@ -194,12 +194,12 @@ TEST(ContinuationTest, MakeStateReturnFuture) {
   std::shared_ptr<internal::shared_state<std::string>> new_state;
   {
     auto state = internal::shared_state<int>::make_new_state();
-    new_state = state->make_continuation_shared_state([](int v) {
+    new_state = state->make_continuation_shared_state([](future<int> v) {
       cfuture::promise<std::string> p;
       auto future = p.get_future();
-      std::thread th([v, p = std::move(p)]() mutable {
+      std::thread th([v = std::move(v), p = std::move(p)]() mutable {
         std::this_thread::sleep_for(100ms);
-        p.set_value(std::to_string(v));
+        p.set_value(std::to_string(v.get()));
       });
       th.detach();
       return future;
@@ -215,7 +215,7 @@ TEST(ContinuationTest, MakeStateReturnDirectly) {
   std::shared_ptr<internal::shared_state<std::string>> new_state;
   {
     auto state = internal::shared_state<int>::make_new_state();
-    new_state = state->make_continuation_shared_state([](int v) { return std::to_string(v); });
+    new_state = state->make_continuation_shared_state([](future<int> v) { return std::to_string(v.get()); });
     state->try_emplace_value(12345);
   }
   EXPECT_EQ("12345", new_state->get_value());
@@ -233,10 +233,10 @@ TEST(ContinuationTest, FutureThen) {
   });
   future<std::string> f;
   f = p.get_future()
-          .then([](int v) {
+          .then([](future<int> v) {
             promise<int> p;
             auto future = p.get_future();
-            std::thread th([v, p = std::move(p)]() mutable {
+            std::thread th([v = v.get(), p = std::move(p)]() mutable {
               std::cout << "run in thread " << std::this_thread::get_id() << '\n';
               std::this_thread::sleep_for(100ms);
               p.set_value(v + 2);
@@ -244,15 +244,15 @@ TEST(ContinuationTest, FutureThen) {
             th.detach();
             return future;
           })
-          .then([](int v) {
+          .then([](future<int> v) -> long {
             std::cout << "run in thread " << std::this_thread::get_id() << '\n';
             std::this_thread::sleep_for(1ms);
-            return v + 3;
+            return v.get() + 3;
           })
-          .then([](int v) {
+          .then([](future<long> v) {
             std::cout << "run in thread " << std::this_thread::get_id() << '\n';
             std::this_thread::sleep_for(1ms);
-            return std::to_string(v + 4);
+            return std::to_string(v.get() + 4);
           });
   EXPECT_EQ("10", f.get());
   th.join();
@@ -264,10 +264,10 @@ TEST(ContinuationTest, FutureThen_FirstStepDelayed) {
   promise<int> p;
   future<std::string> f;
   f = p.get_future()
-          .then([](int v) {
+          .then([](future<int> v) {
             promise<int> p;
             auto future = p.get_future();
-            std::thread th([v, p = std::move(p)]() mutable {
+            std::thread th([v = v.get(), p = std::move(p)]() mutable {
               std::cout << "run in thread " << std::this_thread::get_id() << '\n';
               std::this_thread::sleep_for(100ms);
               p.set_value(v + 2);
@@ -275,18 +275,28 @@ TEST(ContinuationTest, FutureThen_FirstStepDelayed) {
             th.detach();
             return future;
           })
-          .then([](int v) {
+          .then([](future<int> v) {
             std::cout << "run in thread " << std::this_thread::get_id() << '\n';
             std::this_thread::sleep_for(1ms);
-            return v + 3;
+            return v.get() + 3;
           })
-          .then([](int v) {
+          .then([](future<int> v) {
             std::cout << "run in thread " << std::this_thread::get_id() << '\n';
             std::this_thread::sleep_for(1ms);
-            return std::to_string(v + 4);
+            return std::to_string(v.get() + 4);
           });
   ASSERT_EQ("", f.get_or(""));
   ASSERT_EQ(future_status::timeout, f.wait_for(1s));
   p.set_value(1);
   EXPECT_EQ("10", f.get());
+}
+
+TEST(ContinuationTest, FutureThen_Exception) {
+  auto promise = std::make_unique<cfuture::promise<int>>();
+  auto future = promise->get_future().then([](cfuture::future<int> v) {
+    // fo nothing;
+  });
+  delete promise.release();
+  ASSERT_TRUE(future.valid());
+  future.get();
 }
