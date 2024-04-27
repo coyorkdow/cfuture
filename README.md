@@ -14,37 +14,38 @@ The `boost::future` and `std::experimental::future` (in concurrency TS) both sup
 ```cpp
   using namespace std::chrono_literals;
   using namespace cfuture;
-  promise<int> p;
+  Promise<int> p;
   std::cout << "the main thread is " << std::this_thread::get_id() << '\n';
   std::thread th([&] {
-    std::cout << "run in thread id " << std::this_thread::get_id() << '\n';
+    std::cout << "run in thread " << std::this_thread::get_id() << '\n';
     std::this_thread::sleep_for(100ms);
     p.set_value(1);
   });
-  future<std::string> f;
+  Future<std::string> f;
   f = p.get_future()
-          .then([](int v) {
-            promise<int> p;
+          .then([](Future<int> v) {
+            Promise<int> p;
             auto future = p.get_future();
-            std::thread th([v, p = std::move(p)]() mutable {
-              std::cout << "run in thread id " << std::this_thread::get_id() << '\n';
+            std::thread th([v = v.get(), p = std::move(p)]() mutable {
+              std::cout << "run in thread " << std::this_thread::get_id() << '\n';
               std::this_thread::sleep_for(100ms);
               p.set_value(v + 2);
             });
             th.detach();
             return future;
           })
-          .then([](int v) {
-            std::cout << "run in thread id " << std::this_thread::get_id() << '\n';
+          .then([](Future<int> v) -> long {
+            std::cout << "run in thread " << std::this_thread::get_id() << '\n';
             std::this_thread::sleep_for(1ms);
-            return v + 3;
+            return v.get() + 3;
           })
-          .then([](int v) {
-            std::cout << "run in thread id " << std::this_thread::get_id() << '\n';
+          .then([](Future<long> v) {
+            std::cout << "run in thread " << std::this_thread::get_id() << '\n';
             std::this_thread::sleep_for(1ms);
-            return std::to_string(v + 4);
+            return std::to_string(v.get() + 4);
           });
   std::cout << f.get() << '\n';
+  th.join();
 ```
 
 The possible output of the above codes is
