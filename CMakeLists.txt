@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.9)
+cmake_minimum_required(VERSION 3.13)
 project(cfuture)
 
 message(STATUS "CMake C++ Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
@@ -18,6 +18,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
 include_directories(.)
 
+include(CTest)
+
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 set(install_gtest OFF)
 set(install_gmock OFF)
@@ -27,10 +29,9 @@ add_subdirectory(googletest)
 
 add_executable(cfuture_test test/test.cc)
 
-target_compile_options(cfuture_test PUBLIC -g -Wall -fsanitize=address)
-target_link_options(cfuture_test PUBLIC -fsanitize=address)
+target_compile_options(cfuture_test PUBLIC -g -Wall -fsanitize=address --coverage)
+target_link_options(cfuture_test PUBLIC -fsanitize=address --coverage)
 
 target_link_libraries(cfuture_test gmock gtest gtest_main)
 
-include(CTest)
 add_test(NAME cfuture_test COMMAND cfuture_test)
