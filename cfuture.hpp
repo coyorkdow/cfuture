@@ -54,9 +54,12 @@ class future_error : public std::logic_error {
   explicit future_error(future_errc errc)
       : future_error(std::error_code(static_cast<int>(errc), std::future_category())) {}
 
-  virtual ~future_error() noexcept {}
+  future_error(const future_error&) = default;
+  future_error& operator=(const future_error&) = default;
 
-  virtual const char* what() const noexcept { return std::logic_error::what(); }
+  ~future_error() noexcept override = default;
+
+  const char* what() const noexcept override { return std::logic_error::what(); }
 
   const std::error_code& code() const noexcept { return code_; }
 
@@ -475,17 +478,6 @@ class Future {
     return value;
   }
 
-  R get_or(R alter_value) noexcept {
-    // must do not sleep
-    try {
-      if (wait_until(std::chrono::system_clock::now() - std::chrono::seconds(1)) == future_status::ready) {
-        return get();
-      }
-    } catch (...) {
-    }
-    return alter_value;
-  }
-
   template <class Fn>
   auto then(Fn&& attached_function) {
     THROW_IF_NO_STATE_();
@@ -669,7 +661,7 @@ auto shared_state<R>::make_continuation_shared_state(Fn&& continuation)
       temporary_emplace_helper2(new_state.get(), &continuation, std::move(self));
     } catch (...) {
       new_state->try_set_exception(std::current_exception());
-    };
+    }
   });
 
   return new_state;

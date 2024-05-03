@@ -50,7 +50,8 @@ TEST(BasicTest, Wait) {
   auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
   EXPECT_GE(dur.count(), 1000);
   EXPECT_LE(dur.count(), 1100);
-  EXPECT_EQ(123, future.get_or(0));
+  EXPECT_EQ(cfuture::future_status::ready, future.wait_for(0s));
+  EXPECT_EQ(123, future.get());
   th.join();
 }
 
@@ -64,12 +65,12 @@ TEST(BasicTest, WaitFor) {
   });
   cfuture::Future<int> future = p.get_future();
   ASSERT_EQ(cfuture::future_status::timeout, future.wait_for(1ms));
-  ASSERT_EQ(0, future.get_or(0));
   ASSERT_EQ(cfuture::future_status::ready, future.wait_for(5s));
   auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
   EXPECT_GE(dur.count(), 1000);
   EXPECT_LE(dur.count(), 1100);
-  EXPECT_EQ(123, future.get_or(0));
+  EXPECT_EQ(cfuture::future_status::ready, future.wait_for(0s));
+  EXPECT_EQ(123, future.get());
   th.join();
 }
 
@@ -83,12 +84,12 @@ TEST(BasicTest, WaitUntil) {
   });
   cfuture::Future<int> future = p.get_future();
   ASSERT_EQ(cfuture::future_status::timeout, future.wait_until(std::chrono::system_clock::now() + 100ms));
-  ASSERT_EQ(0, future.get_or(0));
   ASSERT_EQ(cfuture::future_status::ready, future.wait_until(std::chrono::system_clock::now() + 5s));
   auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
   EXPECT_GE(dur.count(), 1000);
   EXPECT_LE(dur.count(), 1100);
-  EXPECT_EQ(123, future.get_or(0));
+  EXPECT_EQ(cfuture::future_status::ready, future.wait_for(0s));
+  EXPECT_EQ(123, future.get());
   th.join();
 }
 
@@ -284,7 +285,6 @@ TEST(ContinuationTest, FutureThen_FirstStepDelayed) {
             std::this_thread::sleep_for(1ms);
             return std::to_string(v.get() + 4);
           });
-  ASSERT_EQ("", f.get_or(""));
   ASSERT_EQ(future_status::timeout, f.wait_for(1s));
   p.set_value(1);
   EXPECT_EQ("10", f.get());
