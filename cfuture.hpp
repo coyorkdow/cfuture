@@ -589,7 +589,7 @@ inline Future<void> Promise<void>::get_future() {
 namespace internal {
 
 // The promise object might be no longer exist once the promise is satisfied
-// (a.k.a, shared state state satisfied).
+// (a.k.a, shared state is satisfied).
 
 // The on_satisfied_ callback will run immediately if the shared state is already satisfied.
 
